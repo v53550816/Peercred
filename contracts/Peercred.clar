@@ -625,4 +625,308 @@
   (var-get next-invitation-id)
 )
 
+(define-constant ERR_CITATION_NOT_FOUND (err u118))
+(define-constant ERR_SELF_CITATION_NOT_ALLOWED (err u119))
+(define-constant ERR_CITATION_ALREADY_EXISTS (err u120))
+(define-constant ERR_INVALID_CITATION_TYPE (err u121))
+(define-constant ERR_PAPER_NOT_PUBLISHED (err u122))
+(define-constant CITATION_REPUTATION_REWARD u5)
+(define-constant H_INDEX_CALCULATION_THRESHOLD u10)
+(define-constant MAX_CITATIONS_PER_PAPER u50)
+
+(define-data-var next-citation-id uint u1)
+
+(define-map paper-citations
+  { citing-paper-id: uint, cited-paper-id: uint }
+  {
+    citation-id: uint,
+    citation-type: (string-ascii 20),
+    citation-block: uint,
+    verified: bool
+  }
+)
+
+(define-map citation-details
+  { citation-id: uint }
+  {
+    citing-paper-id: uint,
+    cited-paper-id: uint,
+    citing-author: principal,
+    cited-author: principal,
+    citation-context: (string-ascii 256),
+    importance-score: uint
+  }
+)
+
+(define-map paper-citation-counts
+  { paper-id: uint }
+  {
+    incoming-citations: uint,
+    outgoing-citations: uint,
+    impact-score: uint,
+    last-citation-block: uint
+  }
+)
+
+(define-map author-citation-metrics
+  { author: principal }
+  {
+    total-citations-received: uint,
+    total-citations-given: uint,
+    h-index: uint,
+    citation-reputation: uint,
+    most-cited-paper-id: (optional uint)
+  }
+)
+
+(define-map citation-networks
+  { citing-author: principal, cited-author: principal }
+  {
+    citation-count: uint,
+    first-citation-block: uint,
+    latest-citation-block: uint,
+    collaboration-strength: uint
+  }
+)
+
+(define-map paper-impact-history
+  { paper-id: uint }
+  {
+    citation-milestones: (list 10 uint),
+    peak-citation-period: uint,
+    sustained-impact-score: uint
+  }
+)
+
+(define-public (add-paper-citation (citing-paper-id uint) (cited-paper-id uint) (citation-type (string-ascii 20)) (citation-context (string-ascii 256)) (importance-score uint))
+  (let
+    (
+      (citing-paper (unwrap! (map-get? papers { paper-id: citing-paper-id }) ERR_PAPER_NOT_FOUND))
+      (cited-paper (unwrap! (map-get? papers { paper-id: cited-paper-id }) ERR_PAPER_NOT_FOUND))
+      (citation-id (var-get next-citation-id))
+      (current-block stacks-block-height)
+      (citing-author (get author citing-paper))
+      (cited-author (get author cited-paper))
+    )
+    (asserts! (is-eq tx-sender citing-author) ERR_NOT_AUTHORIZED)
+    (asserts! (not (is-eq citing-paper-id cited-paper-id)) ERR_SELF_CITATION_NOT_ALLOWED)
+    (asserts! (or (is-eq "reviewed" (get status citing-paper)) (is-eq "collaborative" (get status citing-paper))) ERR_PAPER_NOT_PUBLISHED)
+    (asserts! (or (is-eq "reviewed" (get status cited-paper)) (is-eq "collaborative" (get status cited-paper))) ERR_PAPER_NOT_PUBLISHED)
+    (asserts! (is-none (map-get? paper-citations { citing-paper-id: citing-paper-id, cited-paper-id: cited-paper-id })) ERR_CITATION_ALREADY_EXISTS)
+    (asserts! (and (>= importance-score u1) (<= importance-score u10)) ERR_INVALID_SCORE)
+    (asserts! (< (get-paper-outgoing-citations citing-paper-id) MAX_CITATIONS_PER_PAPER) ERR_NOT_AUTHORIZED)
+    
+    (map-set paper-citations
+      { citing-paper-id: citing-paper-id, cited-paper-id: cited-paper-id }
+      {
+        citation-id: citation-id,
+        citation-type: citation-type,
+        citation-block: current-block,
+        verified: true
+      }
+    )
+    
+    (map-set citation-details
+      { citation-id: citation-id }
+      {
+        citing-paper-id: citing-paper-id,
+        cited-paper-id: cited-paper-id,
+        citing-author: citing-author,
+        cited-author: cited-author,
+        citation-context: citation-context,
+        importance-score: importance-score
+      }
+    )
+    
+    (let
+      (
+        (cited-paper-counts (default-to { incoming-citations: u0, outgoing-citations: u0, impact-score: u0, last-citation-block: u0 }
+                                        (map-get? paper-citation-counts { paper-id: cited-paper-id })))
+        (citing-paper-counts (default-to { incoming-citations: u0, outgoing-citations: u0, impact-score: u0, last-citation-block: u0 }
+                                         (map-get? paper-citation-counts { paper-id: citing-paper-id })))
+        (new-cited-incoming (+ (get incoming-citations cited-paper-counts) u1))
+        (new-citing-outgoing (+ (get outgoing-citations citing-paper-counts) u1))
+        (new-impact-score (+ (get impact-score cited-paper-counts) importance-score))
+      )
+      (map-set paper-citation-counts
+        { paper-id: cited-paper-id }
+        (merge cited-paper-counts {
+          incoming-citations: new-cited-incoming,
+          impact-score: new-impact-score,
+          last-citation-block: current-block
+        })
+      )
+      
+      (map-set paper-citation-counts
+        { paper-id: citing-paper-id }
+        (merge citing-paper-counts {
+          outgoing-citations: new-citing-outgoing
+        })
+      )
+    )
+    
+    (let
+      (
+        (cited-author-metrics (default-to { total-citations-received: u0, total-citations-given: u0, h-index: u0, citation-reputation: u0, most-cited-paper-id: none }
+                                          (map-get? author-citation-metrics { author: cited-author })))
+        (citing-author-metrics (default-to { total-citations-received: u0, total-citations-given: u0, h-index: u0, citation-reputation: u0, most-cited-paper-id: none }
+                                           (map-get? author-citation-metrics { author: citing-author })))
+        (new-cited-total (+ (get total-citations-received cited-author-metrics) u1))
+        (new-citing-total (+ (get total-citations-given citing-author-metrics) u1))
+      )
+      (map-set author-citation-metrics
+        { author: cited-author }
+        (merge cited-author-metrics {
+          total-citations-received: new-cited-total,
+          citation-reputation: (+ (get citation-reputation cited-author-metrics) CITATION_REPUTATION_REWARD)
+        })
+      )
+      
+      (map-set author-citation-metrics
+        { author: citing-author }
+        (merge citing-author-metrics {
+          total-citations-given: new-citing-total
+        })
+      )
+    )
+    
+    (map-set user-reputation
+      { user: cited-author }
+      { reputation: (+ (get-user-reputation cited-author) CITATION_REPUTATION_REWARD) }
+    )
+    
+    (let
+      (
+        (network-data (default-to { citation-count: u0, first-citation-block: current-block, latest-citation-block: current-block, collaboration-strength: u0 }
+                                  (map-get? citation-networks { citing-author: citing-author, cited-author: cited-author })))
+        (new-count (+ (get citation-count network-data) u1))
+        (new-strength (+ (get collaboration-strength network-data) importance-score))
+      )
+      (map-set citation-networks
+        { citing-author: citing-author, cited-author: cited-author }
+        {
+          citation-count: new-count,
+          first-citation-block: (get first-citation-block network-data),
+          latest-citation-block: current-block,
+          collaboration-strength: new-strength
+        }
+      )
+    )
+    
+    (var-set next-citation-id (+ citation-id u1))
+    (ok citation-id)
+  )
+)
+
+(define-public (update-author-h-index (author principal))
+  (let
+    (
+      (author-metrics (default-to { total-citations-received: u0, total-citations-given: u0, h-index: u0, citation-reputation: u0, most-cited-paper-id: none }
+                                  (map-get? author-citation-metrics { author: author })))
+      (paper-count (get-author-paper-count author))
+    )
+    (asserts! (>= paper-count H_INDEX_CALCULATION_THRESHOLD) ERR_INSUFFICIENT_REPUTATION)
+    
+    (let
+      (
+        (calculated-h-index (calculate-h-index-for-author author))
+      )
+      (map-set author-citation-metrics
+        { author: author }
+        (merge author-metrics { h-index: calculated-h-index })
+      )
+      (ok calculated-h-index)
+    )
+  )
+)
+
+(define-public (verify-citation (citation-id uint))
+  (let
+    (
+      (citation-data (unwrap! (map-get? citation-details { citation-id: citation-id }) ERR_CITATION_NOT_FOUND))
+      (citing-paper-id (get citing-paper-id citation-data))
+      (cited-paper-id (get cited-paper-id citation-data))
+    )
+    (asserts! (or (is-eq tx-sender (get cited-author citation-data)) (is-eq tx-sender CONTRACT_OWNER)) ERR_NOT_AUTHORIZED)
+    
+    (map-set paper-citations
+      { citing-paper-id: citing-paper-id, cited-paper-id: cited-paper-id }
+      (merge (unwrap! (map-get? paper-citations { citing-paper-id: citing-paper-id, cited-paper-id: cited-paper-id }) ERR_CITATION_NOT_FOUND)
+             { verified: true })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-paper-citation (citing-paper-id uint) (cited-paper-id uint))
+  (map-get? paper-citations { citing-paper-id: citing-paper-id, cited-paper-id: cited-paper-id })
+)
+
+(define-read-only (get-citation-details (citation-id uint))
+  (map-get? citation-details { citation-id: citation-id })
+)
+
+(define-read-only (get-paper-citation-counts (paper-id uint))
+  (map-get? paper-citation-counts { paper-id: paper-id })
+)
+
+(define-read-only (get-author-citation-metrics (author principal))
+  (map-get? author-citation-metrics { author: author })
+)
+
+(define-read-only (get-citation-network (citing-author principal) (cited-author principal))
+  (map-get? citation-networks { citing-author: citing-author, cited-author: cited-author })
+)
+
+(define-read-only (get-paper-impact-history (paper-id uint))
+  (map-get? paper-impact-history { paper-id: paper-id })
+)
+
+(define-read-only (get-paper-incoming-citations (paper-id uint))
+  (default-to u0 (get incoming-citations (map-get? paper-citation-counts { paper-id: paper-id })))
+)
+
+(define-read-only (get-paper-outgoing-citations (paper-id uint))
+  (default-to u0 (get outgoing-citations (map-get? paper-citation-counts { paper-id: paper-id })))
+)
+
+(define-read-only (get-paper-impact-score (paper-id uint))
+  (default-to u0 (get impact-score (map-get? paper-citation-counts { paper-id: paper-id })))
+)
+
+(define-read-only (get-author-h-index (author principal))
+  (default-to u0 (get h-index (map-get? author-citation-metrics { author: author })))
+)
+
+(define-read-only (get-author-citation-reputation (author principal))
+  (default-to u0 (get citation-reputation (map-get? author-citation-metrics { author: author })))
+)
+
+(define-read-only (calculate-h-index-for-author (author principal))
+  (let
+    (
+      (total-papers (get-author-paper-count author))
+      (total-citations (default-to u0 (get total-citations-received (map-get? author-citation-metrics { author: author }))))
+      (citation-factor (/ total-citations u2))
+    )
+    (if (> total-papers u0)
+      (if (< total-papers citation-factor) total-papers citation-factor)
+      u0
+    )
+  )
+)
+
+(define-read-only (get-next-citation-id)
+  (var-get next-citation-id)
+)
+
+(define-read-only (is-citation-verified (citing-paper-id uint) (cited-paper-id uint))
+  (match (get-paper-citation citing-paper-id cited-paper-id)
+    citation-data (get verified citation-data)
+    false
+  )
+)
+
 ;; private functions
+
+
