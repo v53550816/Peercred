@@ -1,0 +1,23 @@
+[project]
+name = 'Peercred'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Peercred]
+path = 'contracts/Peercred.clar'
+clarity_version = 3
+epoch = 3.1
+[contracts.expert-panels]
+path = 'contracts/expert-panels.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
